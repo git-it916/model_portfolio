@@ -365,6 +365,10 @@ HTML_TEMPLATE = r"""<!doctype html>
     .sector-name { font-weight: 700; color: var(--head); font-size: 13.5px; }
     .sector-target { font-weight: 700; font-size: 13.5px; font-variant-numeric: tabular-nums; }
     .sector-count { font-size: 11px; color: var(--muted); }
+    .nav-subtotal { display: flex; justify-content: space-between; align-items: center; padding: 6px 11px; font-size: 12.5px; font-weight: 700; color: var(--head); background: #eef3f8; border: 1px solid var(--line); border-radius: 6px; font-variant-numeric: tabular-nums; }
+    .nav-subtotal.muted-row { color: var(--muted); font-weight: 600; background: #f7f9fb; }
+    .nav-subtotal.total-row { color: var(--head-2); background: #e8f1f7; border-color: #c4d8e6; }
+    .nav-divider { height: 0; border-top: 1px dashed var(--line-strong); margin: 6px 2px; }
     .sector-stock-box { border: 1px solid var(--line); border-radius: 6px; background: #fafbfd; display: flex; flex-direction: column; min-height: 0; overflow: hidden; flex: 1 1 auto; }
     .sector-stock-head { padding: 7px 10px; font-weight: 700; color: var(--head); font-size: 12px; background: #eef3f8; border-bottom: 1px solid var(--line); display: flex; justify-content: space-between; }
     .sector-stock-list { margin: 0; padding: 6px; list-style: none; display: grid; gap: 4px; overflow: auto; }
@@ -865,7 +869,7 @@ HTML_TEMPLATE = r"""<!doctype html>
     function renderGroupNav() {
       const nav = document.getElementById("groupNav");
       nav.innerHTML = "";
-      TABS.forEach((t) => {
+      const mkBtn = (t) => {
         const b = document.createElement("button");
         b.type = "button"; b.className = "sector-button" + (t === state.assetTab ? " active" : "");
         const r1 = document.createElement("div"); r1.className = "sector-row";
@@ -877,8 +881,31 @@ HTML_TEMPLATE = r"""<!doctype html>
         r2.appendChild(cnt);
         b.appendChild(r1); b.appendChild(r2);
         b.addEventListener("click", () => { state.assetTab = t; state.group = "all"; render(); });
-        nav.appendChild(b);
-      });
+        return b;
+      };
+      const subtotal = (label, value, extra) => {
+        const d = document.createElement("div"); d.className = "nav-subtotal" + (extra ? " " + extra : "");
+        const a = document.createElement("span"); a.textContent = label;
+        const b = document.createElement("span"); b.textContent = value;
+        d.appendChild(a); d.appendChild(b);
+        return d;
+      };
+      const divider = () => { const d = document.createElement("div"); d.className = "nav-divider"; return d; };
+
+      const stockW = tabWeight("domesticStock") + tabWeight("overseasStock");
+      const cashW = DATA.nav ? Math.max(0, 1 - stockW) : 0;
+      const futW = tabWeight("domesticFutures") + tabWeight("overseasFutures");
+
+      nav.appendChild(mkBtn("domesticStock"));
+      nav.appendChild(mkBtn("overseasStock"));
+      nav.appendChild(subtotal("주식 소계", formatPct(stockW)));
+      nav.appendChild(subtotal("현금·기타", formatPct(cashW), "muted-row"));
+      nav.appendChild(subtotal("자본 합계", formatPct(stockW + cashW), "total-row"));
+      nav.appendChild(divider());
+      nav.appendChild(mkBtn("domesticFutures"));
+      nav.appendChild(mkBtn("overseasFutures"));
+      nav.appendChild(subtotal("선물 노셔널 합", formatPct(futW), "muted-row"));
+
       document.getElementById("groupHint").textContent = TAB_LABEL[state.assetTab];
     }
 
