@@ -99,7 +99,8 @@ def read_sheet1(ws):
     - 순종목비(%NAV[당일]) 를 비중으로 직접 사용 (역산 불필요).
     - 보유수량 = 전일보유수량 + 당일증감수량 (선물은 부호 = 방향).
     - 선물 평가액은 부호가 있을 수 있어 절대값(valueAbs)도 함께 보관.
-    - 수익률 = 손익 / (평가액 - 손익).
+    - 취득원가 = 전일평가액 - 전일평가손익 (두 값 모두 '전일' 컬럼이라 날짜 정합).
+    - 수익률 = (당일평가액 - 취득원가) / 취득원가.  (전일손익을 당일평가액에서 빼던 버그 수정)
     """
     cats = {c: [] for c in CATEGORIES}
     for r in range(2, ws.max_row + 1):
@@ -126,10 +127,12 @@ def read_sheet1(ws):
             elif qty is not None:
                 direction = "매도" if qty < 0 else "매수"
 
+        prev_value = clean_number(_cell(ws, r, "prevValue"))  # 전일평가액(원)
         return_pct = None
-        if not is_futures and value is not None and pnl is not None:
-            cost = value - pnl
-            return_pct = (pnl / cost * 100.0) if cost else None
+        if not is_futures and prev_value is not None and pnl is not None:
+            cost = prev_value - pnl  # 취득원가 = 전일평가액 − 전일평가손익
+            if cost and value is not None:
+                return_pct = (value - cost) / cost * 100.0  # 당일평가액 기준 수익률
 
         cats[cat].append({
             "no": clean_number(_cell(ws, r, "no")),
@@ -146,6 +149,7 @@ def read_sheet1(ws):
             "price": clean_number(_cell(ws, r, "price")),
             "value": value,
             "valueAbs": abs(value) if value is not None else None,
+            "prevValue": prev_value,
             "weight": weight,
             "weightPrev": weight_prev,
             "pnl": pnl,
@@ -413,6 +417,17 @@ HTML_TEMPLATE = r"""<!doctype html>
     .delete-row { width: 30px; padding: 0; }
     .grid-2 { display: grid; grid-template-columns: minmax(0, 1fr) minmax(320px, 0.7fr); gap: 14px; }
     .chart-layout { display: grid; grid-template-columns: minmax(200px, 250px) minmax(0, 1fr); gap: 16px; align-items: center; }
+    .exp-wrap { margin-top: 20px; padding-top: 14px; border-top: 1px dashed var(--line); }
+    .exp-head { display: flex; justify-content: space-between; align-items: baseline; font-size: 12px; font-weight: 700; color: var(--head); margin-bottom: 18px; }
+    .exp-head .muted { font-weight: 600; }
+    .exp-track { position: relative; height: 28px; background: #eef1f5; border-radius: 6px; display: flex; overflow: visible; }
+    .exp-seg { height: 100%; display: flex; align-items: center; justify-content: center; font-size: 10.5px; color: #fff; font-weight: 700; white-space: nowrap; overflow: hidden; }
+    .exp-seg:first-child { border-radius: 6px 0 0 6px; }
+    .exp-seg:last-child { border-radius: 0 6px 6px 0; }
+    .exp-marker { position: absolute; top: -6px; bottom: -6px; width: 2px; background: var(--head); z-index: 3; }
+    .exp-marker-label { position: absolute; top: -16px; transform: translateX(-50%); font-size: 10px; font-weight: 700; color: var(--head); white-space: nowrap; }
+    .exp-legend { display: flex; flex-wrap: wrap; gap: 6px 14px; margin-top: 12px; font-size: 11.5px; }
+    .exp-legend .legend-item { gap: 6px; }
     .pie-wrap { display: grid; justify-items: center; gap: 9px; }
     .pie-chart { width: min(230px, 100%); aspect-ratio: 1; border-radius: 50%; background: conic-gradient(#d7dde6 0 100%); border: 1px solid var(--line); position: relative; }
     .pie-chart::after { content: ''; position: absolute; width: 50%; height: 50%; top: 25%; left: 25%; background: var(--panel); border-radius: 50%; box-shadow: 0 0 0 4px var(--panel); }
@@ -508,7 +523,7 @@ HTML_TEMPLATE = r"""<!doctype html>
 
     <section class="grid-2">
       <section class="panel">
-        <div class="panel-head"><span>자산 배분</span><span class="muted">선물 제외(노셔널)</span></div>
+        <div class="panel-head"><span>자산 배분</span><span class="muted">자본 100% + 선물 노셔널</span></div>
         <div class="panel-body">
           <div class="chart-layout">
             <div class="pie-wrap">
@@ -518,6 +533,7 @@ HTML_TEMPLATE = r"""<!doctype html>
             </div>
             <div class="legend" id="allocLegend"></div>
           </div>
+          <div class="exp-wrap" id="exposureWrap"></div>
         </div>
       </section>
       <section class="panel">
@@ -532,7 +548,7 @@ HTML_TEMPLATE = r"""<!doctype html>
   <script>
     const DATA = __DATA_JSON__;
     const STORAGE_KEY = `blackon-dashboard:${DATA.workbook}:${DATA.workbookModifiedAt}:${DATA.workbookSize}`;
-    const CHART_COLORS = { domestic: "#1f6f8f", overseas: "#7a9f35", cash: "#c46a2b" };
+    const CHART_COLORS = { domestic: "#1f6f8f", overseas: "#7a9f35", cash: "#c46a2b", domesticFut: "#6f5aa7", overseasFut: "#b75b7a" };
     const TABS = ["domesticStock", "domesticFutures", "overseasStock", "overseasFutures"];
     const TAB_LABEL = { domesticStock: "국내주식", domesticFutures: "국내선물", overseasStock: "해외주식", overseasFutures: "해외선물" };
     const isFut = (t) => t === "domesticFutures" || t === "overseasFutures";
@@ -557,7 +573,7 @@ HTML_TEMPLATE = r"""<!doctype html>
         sourceRow: h.sourceRow, deleted: false, isNew: false, category: h.category,
         group: h.group, kind: h.kind, code: h.code, ticker: h.ticker, stockName: h.stockName,
         qty: h.qty, qty0: h.qty, price: h.price, value0: h.value,
-        cost0: (h.value != null && h.pnl != null) ? h.value - h.pnl : null,
+        cost0: (h.prevValue != null && h.pnl != null) ? h.prevValue - h.pnl : null,
         weightPrev: h.weightPrev, targetPct: null, memo: "",
       };
     }
@@ -999,6 +1015,48 @@ HTML_TEMPLATE = r"""<!doctype html>
         const vl = document.createElement("span"); vl.className = "legend-val"; vl.textContent = `${formatPct(p.val / nav)} · ${formatEok(p.val)}`;
         item.appendChild(sw); item.appendChild(lb); item.appendChild(vl); legend.appendChild(item);
       });
+      renderExposureBar(nav, parts);
+    }
+
+    function renderExposureBar(nav, capitalParts) {
+      const wrap = document.getElementById("exposureWrap");
+      if (!wrap) return;
+      const dfn = sum(activeList("domesticFutures").map((r) => liveFut(r).valueAbs));
+      const ofn = sum(activeList("overseasFutures").map((r) => liveFut(r).valueAbs));
+      const dfList = activeList("domesticFutures").map(liveFut);
+      const ofList = activeList("overseasFutures").map(liveFut);
+      const futNet = sum(dfList.map((c) => dirSign(c.direction) * c.valueAbs)) + sum(ofList.map((c) => dirSign(c.direction) * c.valueAbs));
+      const segs = capitalParts.map((p) => ({ key: p.key, label: p.label, val: p.val }))
+        .concat([{ key: "domesticFut", label: "국내선물", val: dfn }, { key: "overseasFut", label: "해외선물", val: ofn }]);
+      const total = nav + dfn + ofn;
+      wrap.innerHTML = "";
+      const head = document.createElement("div"); head.className = "exp-head";
+      head.innerHTML = `<span>총 익스포저 (NAV 대비)</span><span class="muted">자본 100% + 선물 노셔널 ${formatPct((dfn + ofn) / nav)} · 순노출 ${formatPct(futNet / nav)}</span>`;
+      wrap.appendChild(head);
+      const track = document.createElement("div"); track.className = "exp-track";
+      segs.forEach((s) => {
+        if (!s.val) return;
+        const seg = document.createElement("div"); seg.className = "exp-seg";
+        seg.style.width = (s.val / total * 100) + "%";
+        seg.style.background = CHART_COLORS[s.key];
+        const pctOfNav = s.val / nav * 100;
+        if (pctOfNav >= 7) seg.textContent = formatPct(s.val / nav);
+        seg.title = `${s.label} ${formatPct(s.val / nav)} · ${formatEok(s.val)}`;
+        track.appendChild(seg);
+      });
+      const marker = document.createElement("div"); marker.className = "exp-marker"; marker.style.left = (nav / total * 100) + "%";
+      const ml = document.createElement("div"); ml.className = "exp-marker-label"; ml.textContent = "자본 100%"; marker.appendChild(ml);
+      track.appendChild(marker);
+      wrap.appendChild(track);
+      const lg = document.createElement("div"); lg.className = "exp-legend";
+      segs.forEach((s) => {
+        if (!s.val) return;
+        const item = document.createElement("div"); item.className = "legend-item";
+        const sw = document.createElement("span"); sw.className = "legend-swatch"; sw.style.background = CHART_COLORS[s.key];
+        const lb = document.createElement("span"); lb.textContent = `${s.label} ${formatPct(s.val / nav)}`;
+        item.appendChild(sw); item.appendChild(lb); lg.appendChild(item);
+      });
+      wrap.appendChild(lg);
     }
 
     function renderFutSummary() {
